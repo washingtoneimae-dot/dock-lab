@@ -5,6 +5,11 @@ import { DockEngine } from './engine.js';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 
+// Quench ramps to 0 K over roughly this long, rather than cutting the
+// temperature in a single frame, so each pose has time to relax.
+const QUENCH_RAMP_MS = 40000;
+const REHEAT_COOL_RATE = 0.022; // K per ms
+
 const canvas = $('#canvas');
 const stage = $('#stage');
 const panel = $('#panel');
@@ -47,6 +52,7 @@ const state = {
   qualityTimer: 0,
   cooling: false,
   coolTarget: 90,
+  coolRate: REHEAT_COOL_RATE,
   quenching: false,
   quenchAnnounced: false,
   dragging: false,
@@ -160,7 +166,7 @@ function loop(now) {
   if (!document.hidden && state.running) {
     if (state.cooling) {
       const t = engine.opts.temperature;
-      const nt = Math.max(state.coolTarget, t - dt * 0.022);
+      const nt = Math.max(state.coolTarget, t - dt * state.coolRate);
       if (nt !== t) {
         engine.setOptions({ temperature: nt });
         const slider = $('#temperature');
@@ -170,8 +176,19 @@ function loop(now) {
         els.temp.textContent = Math.round(nt);
       }
       if (nt <= state.coolTarget + 0.5) {
+        // Land exactly on the target so 0 K really disables wake and migration.
+        engine.setOptions({ temperature: state.coolTarget });
+        const slider = $('#temperature');
+        slider.value = String(state.coolTarget);
+        updateRange(slider);
+        $('#o-temp').textContent = `${Math.round(state.coolTarget)} K`;
+        els.temp.textContent = Math.round(state.coolTarget);
         state.cooling = false;
-        toast(`Annealed to ${Math.round(nt)} K`);
+        if (state.quenching && state.coolTarget <= 0.5) {
+          toast('Quench reached 0 K · wake and migration off · watching mean |ΔE|');
+        } else {
+          toast(`Annealed to ${Math.round(state.coolTarget)} K`);
+        }
       }
     }
     engine.step();
@@ -249,7 +266,7 @@ function onStats(s) {
   els.rmsd.textContent = s.rmsd == null ? '–' : s.rmsd.toFixed(2);
   els.rmsd.classList.toggle('good', s.rmsd != null && s.rmsd < 2.0);
 
-  const converged = state.quenching && s.converged;
+  const converged = state.quenching && s.converged && engine.opts.temperature <= 0.5;
   if (state.quenching) {
     const label = !state.running ? 'paused' : converged ? 'converged' : 'quench';
     els.state.textContent = label;
@@ -453,6 +470,7 @@ function bindControls() {
     engine.setOptions({ temperature: 620 });
     state.cooling = true;
     state.coolTarget = 90;
+    state.coolRate = REHEAT_COOL_RATE;
     state.quenching = false;
     state.quenchAnnounced = false;
     const slider = $('#temperature');
@@ -463,21 +481,28 @@ function bindControls() {
     toast('Reheat to 620 K · annealing');
   });
   $('#quench').addEventListener('click', () => {
-    state.cooling = false;
+    const startT = Math.max(0, engine.opts.temperature);
     state.quenching = true;
     state.quenchAnnounced = false;
-    engine.setOptions({ temperature: 0 });
-    const slider = $('#temperature');
-    slider.value = '0';
-    updateRange(slider);
-    $('#o-temp').textContent = '0 K';
-    els.temp.textContent = '0';
+    state.coolTarget = 0;
+    state.cooling = startT > 0.5;
+    state.coolRate = state.cooling ? startT / QUENCH_RAMP_MS : REHEAT_COOL_RATE;
+    if (!state.cooling) {
+      engine.setOptions({ temperature: 0 });
+      const slider = $('#temperature');
+      slider.value = '0';
+      updateRange(slider);
+      $('#o-temp').textContent = '0 K';
+      els.temp.textContent = '0';
+    }
     if (!state.running) toggleRun();
     els.state.textContent = 'quench';
     els.state.classList.toggle('is-paused', false);
     els.state.classList.toggle('is-converged', false);
     els.chartNote.textContent = 'quench';
-    toast('Quench · 0 K · wake and migration off · watching mean |ΔE|');
+    toast(state.cooling
+      ? `Quench · cooling ${Math.round(startT)} → 0 K over ~${Math.round(QUENCH_RAMP_MS / 1000)} s`
+      : 'Quench · 0 K · wake and migration off · watching mean |ΔE|');
   });
   $('#focus-best').addEventListener('click', () => {
     if (!engine.best) return toast('No best pose yet');

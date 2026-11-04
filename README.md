@@ -167,11 +167,12 @@ anneals back down. A spherical restraint keeps poses inside the search volume, w
 defaults to 0.85× the ligand-derived radius — a normal redocking search box, and enough to
 remove edge-of-box false positives.
 
-**Quench** drops the swarm to 0 K, which also switches off thermal wake and the
-best-pose migration, so poses settle into their nearest local minima instead of being
-recycled. While a quench is running the status badge shows `quench`; it flips to
-`converged` once every pose is asleep, or once the mean per-pose |ΔE| stays below
-0.05 kcal/mol with no moving poses for 2 seconds.
+**Quench** anneals the swarm from its current temperature to 0 K over roughly 40 seconds,
+rather than cutting the heat in a single frame, so poses have time to relax as the thermal
+kicks fade. Reaching 0 K also switches off thermal wake and the best-pose migration, so
+poses settle into their nearest local minima instead of being recycled. While a quench is
+running the status badge shows `quench`; it flips to `converged` once every pose is asleep,
+or once the mean per-pose |ΔE| stays below 0.05 kcal/mol with no moving poses for 2 seconds.
 
 ## Controls
 
@@ -189,8 +190,8 @@ recycled. While a quench is running the status badge shows `quench`; it flips to
 Panel: pose count, temperature, substeps, Lennard-Jones / Coulomb / solvent / pocket-contact
 scales, search volume, **flexible ligand** switch, view toggles, energy trace, and a PDB
 loader (drop in any PDB with a non-water HETATM ligand; the most populated one is used).
-**Reset** re-seeds the swarm, **Reheat** jumps to 620 K and anneals, and **Quench** drops to
-0 K and reports convergence.
+**Reset** re-seeds the swarm, **Reheat** jumps to 620 K and anneals, and **Quench** ramps
+from the current temperature down to 0 K over ~40 seconds and reports convergence.
 
 The HUD separates two pose counts that used to be conflated: **awake** is the number of
 poses whose sleep flag is set (they are integrated and rendered bright), while **moving**

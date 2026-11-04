@@ -29,6 +29,19 @@ node server.mjs --port 5173 --open
 
 The page itself needs WebGL2 with float render targets (`EXT_color_buffer_float`).
 
+### Run on another device (LAN)
+
+By default the server listens only on `127.0.0.1`, so it is reachable from this machine
+only. To open the lab from a phone or another computer on the same network:
+
+```bash
+HOST=0.0.0.0 npm run serve
+```
+
+Then browse to `http://<this-machine-ip>:5173/` from the other device. Allow TCP port
+5173 through the firewall if needed. The server has no authentication or access control,
+so only expose it on a network you trust.
+
 ---
 
 ## Measured performance

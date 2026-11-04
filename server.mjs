@@ -89,13 +89,55 @@ server.on('error', (err) => {
   throw err;
 });
 
+/**
+ * Open `url` in the default browser, trying platform-appropriate helpers.
+ * Never throws and never keeps the server alive if no opener is available.
+ */
+function openBrowser(url) {
+  const attempts = process.platform === 'darwin'
+    ? [['open', [url]]]
+    : process.platform === 'win32'
+      // Windows: `start` is a cmd builtin, not an executable; the empty string is its title argument.
+      ? [['cmd', ['/c', 'start', '', url]]]
+      : [['xdg-open', [url]], ['gio', ['open', url]], ['sensible-browser', [url]]];
+
+  const tryNext = (index) => {
+    if (index >= attempts.length) {
+      console.log(`  Could not open a browser automatically. Open ${url} manually.`);
+      return;
+    }
+    const [command, args] = attempts[index];
+    let child;
+    try {
+      child = spawn(command, args, {
+        stdio: 'ignore',
+        detached: true,
+        windowsHide: true
+      });
+    } catch {
+      tryNext(index + 1);
+      return;
+    }
+
+    let settled = false;
+    const next = () => {
+      if (settled) return;
+      settled = true;
+      tryNext(index + 1);
+    };
+    child.once('error', next);
+    child.once('exit', (code) => {
+      if (!settled && code !== 0) next();
+      else settled = true;
+    });
+    child.unref();
+  };
+
+  tryNext(0);
+}
+
 server.listen(PORT, HOST, () => {
   const url = `http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}/`;
   console.log(`\n  docklab  →  ${url}\n  serving ${ROOT}\n  ctrl+c to stop\n`);
-  if (OPEN) {
-    const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-    try {
-      spawn(cmd, [url], { stdio: 'ignore', detached: true }).unref();
-    } catch { /* no desktop, no problem */ }
-  }
+  if (OPEN) openBrowser(url);
 });

@@ -18,7 +18,8 @@ const chart = $('#chart');
 const qualityBadge = $('#quality-badge');
 
 const els = {
-  fps: $('#s-fps'), atoms: $('#s-atoms'), poses: $('#s-poses'), active: $('#s-active'),
+  fps: $('#s-fps'), atoms: $('#s-atoms'), poses: $('#s-poses'),
+  awake: $('#s-awake'), moving: $('#s-moving'),
   best: $('#s-best'), state: $('#s-state'),
   energy: $('#m-energy'), rmsd: $('#m-rmsd'), mean: $('#m-mean'),
   hudTarget: $('#hud-target'), hudPdb: $('#hud-pdb'), hudGpu: $('#hud-gpu'), hudQuality: $('#hud-quality'),
@@ -46,6 +47,8 @@ const state = {
   qualityTimer: 0,
   cooling: false,
   coolTarget: 90,
+  quenching: false,
+  quenchAnnounced: false,
   dragging: false,
   lastX: 0,
   lastY: 0,
@@ -238,15 +241,33 @@ function onStats(s) {
   state.lastStat = s;
   els.atoms.textContent = formatCount(s.atoms);
   els.poses.textContent = formatCount(s.poses);
-  els.active.textContent = String(s.active);
+  els.awake.textContent = String(s.awake ?? s.active ?? '–');
+  els.moving.textContent = String(s.moving ?? '–');
   els.best.textContent = s.best == null ? '–' : s.best.toFixed(1);
   els.energy.textContent = s.best == null ? '–' : s.best.toFixed(1);
   els.mean.textContent = s.mean == null ? '–' : s.mean.toFixed(1);
   els.rmsd.textContent = s.rmsd == null ? '–' : s.rmsd.toFixed(2);
   els.rmsd.classList.toggle('good', s.rmsd != null && s.rmsd < 2.0);
-  els.state.textContent = state.running ? 'live' : 'paused';
-  els.state.classList.toggle('is-paused', !state.running);
-  els.chartNote.textContent = state.running ? 'live' : 'paused';
+
+  const converged = state.quenching && s.converged;
+  if (state.quenching) {
+    const label = !state.running ? 'paused' : converged ? 'converged' : 'quench';
+    els.state.textContent = label;
+    els.state.classList.toggle('is-paused', !state.running);
+    els.state.classList.toggle('is-converged', converged && state.running);
+    els.chartNote.textContent = label;
+    if (converged && !state.quenchAnnounced) {
+      state.quenchAnnounced = true;
+      const dE = s.energyDelta == null ? '—' : s.energyDelta.toFixed(3);
+      const best = s.best == null ? '—' : s.best.toFixed(1);
+      toast(`Quench converged · mean |ΔE| ${dE} · best ${best} kcal/mol`);
+    }
+  } else {
+    els.state.textContent = state.running ? 'live' : 'paused';
+    els.state.classList.toggle('is-paused', !state.running);
+    els.state.classList.toggle('is-converged', false);
+    els.chartNote.textContent = state.running ? 'live' : 'paused';
+  }
   els.hudQuality.textContent = `${formatCount(s.atoms)} atoms · ${formatCount(s.poses)} poses`;
   drawChart(s.history);
 }
@@ -402,6 +423,8 @@ function bindControls() {
 
   bindRange('temperature', 'o-temp', (v) => `${Math.round(v)} K`, (v) => {
     state.cooling = false;
+    state.quenching = false;
+    state.quenchAnnounced = false;
     engine.setOptions({ temperature: Number(v) });
     els.temp.textContent = Math.round(v);
   });
@@ -421,6 +444,8 @@ function bindControls() {
   $('#reset').addEventListener('click', () => {
     engine.reset(true);
     state.cooling = false;
+    state.quenching = false;
+    state.quenchAnnounced = false;
     toast('Pose swarm re-seeded');
   });
   $('#reheat').addEventListener('click', () => {
@@ -428,12 +453,31 @@ function bindControls() {
     engine.setOptions({ temperature: 620 });
     state.cooling = true;
     state.coolTarget = 90;
+    state.quenching = false;
+    state.quenchAnnounced = false;
     const slider = $('#temperature');
     slider.value = '620';
     updateRange(slider);
     $('#o-temp').textContent = '620 K';
     els.temp.textContent = '620';
     toast('Reheat to 620 K · annealing');
+  });
+  $('#quench').addEventListener('click', () => {
+    state.cooling = false;
+    state.quenching = true;
+    state.quenchAnnounced = false;
+    engine.setOptions({ temperature: 0 });
+    const slider = $('#temperature');
+    slider.value = '0';
+    updateRange(slider);
+    $('#o-temp').textContent = '0 K';
+    els.temp.textContent = '0';
+    if (!state.running) toggleRun();
+    els.state.textContent = 'quench';
+    els.state.classList.toggle('is-paused', false);
+    els.state.classList.toggle('is-converged', false);
+    els.chartNote.textContent = 'quench';
+    toast('Quench · 0 K · wake and migration off · watching mean |ΔE|');
   });
   $('#focus-best').addEventListener('click', () => {
     if (!engine.best) return toast('No best pose yet');
@@ -486,6 +530,9 @@ function bindControls() {
       target = next;
       engine.setTarget(next);
       engine.resize(stage.clientWidth, stage.clientHeight, state.dpr);
+      state.cooling = false;
+      state.quenching = false;
+      state.quenchAnnounced = false;
       updateTargetUI(next);
       updateEngineUI();
       els.hudGpu.textContent = shortGPU(engine.renderer);
@@ -538,7 +585,9 @@ function updateEngineUI() {
   els.cutoff.textContent = engine.opts.cutoff.toFixed(1);
   $('#o-substeps').textContent = engine.opts.substeps;
   $('#o-temp').textContent = `${Math.round(engine.opts.temperature)} K`;
-  els.state.textContent = state.running ? 'live' : 'paused';
+  els.state.textContent = state.running ? (state.quenching ? 'quench' : 'live') : 'paused';
+  els.state.classList.toggle('is-paused', !state.running);
+  els.state.classList.toggle('is-converged', false);
 }
 
 const KNOWN_TARGETS = {
@@ -561,9 +610,11 @@ function toggleRun() {
   state.running = !state.running;
   els.run.classList.toggle('is-paused', !state.running);
   els.runLabel.textContent = state.running ? 'Pause' : 'Run';
-  els.state.textContent = state.running ? 'live' : 'paused';
+  const label = state.running ? (state.quenching ? 'quench' : 'live') : 'paused';
+  els.state.textContent = label;
   els.state.classList.toggle('is-paused', !state.running);
-  els.chartNote.textContent = state.running ? 'live' : 'paused';
+  els.state.classList.toggle('is-converged', false);
+  els.chartNote.textContent = label;
   if (state.running) lastFrame = performance.now();
 }
 

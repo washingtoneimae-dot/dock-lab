@@ -17,6 +17,9 @@ import {
 const TEX_W = 4096;
 const LIG_TEX_W = 64;
 
+// Keep the CPU-side "moving" count in sync with the shader's sleep test.
+const SLEEP_VEL2 = 0.00025;
+
 // ------------------------------------------------------------- math -------
 
 function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
@@ -616,9 +619,15 @@ void main() {
   float amp = sqrt(max(uTemp, 0.0) / 300.0);
 
   if (a.w < 0.5 && uReheat < 0.5) {
-    // Swarm Genetic Migration: if a pose is stuck in a high-energy trap (> +15 kcal/mol above best)
-    // for more than 40 frames, migrate it to explore the winning pocket minimum!
-    if (uHasBest > 0.5 && v.w > 40.0 && f.w > uBestEnergy + 15.0) {
+    if (uUseSleep < 0.5) {
+      // Sleep was switched off while this pose was asleep: wake it and fall
+      // through to the integration step so forces can move it again.
+      a.w = 1.0;
+      v.w = 0.0;
+    } else if (uTemp > 1.0 && uHasBest > 0.5 && v.w > 40.0 && f.w > uBestEnergy + 15.0) {
+      // Swarm Genetic Migration: if a pose is stuck in a high-energy trap (> +15 kcal/mol above best)
+      // for more than 40 frames, migrate it to explore the winning pocket minimum!
+      // Gated above 1 K so a quench can freeze high-energy local minima in place.
       float r1 = hash11(float(coord.x) * 2.31 + uFrame * 0.017 + uSeed + 13.0);
       float r2 = hash11(float(coord.x) * 3.73 + uFrame * 0.029 + uSeed + 29.0);
       float r3 = hash11(float(coord.x) * 4.97 + uFrame * 0.043 + uSeed + 41.0);
@@ -1077,7 +1086,11 @@ export class DockEngine {
     this.eMin = -20;
     this.eMax = 20;
     this.activeCount = 0;
+    this.movingCount = 0;
     this.meanEnergy = 0;
+    this.energyDelta = null;
+    this.converged = false;
+    this.stableSince = 0;
     this.fps = 0;
     this.renderScale = this.opts.renderScale;
     this.camera = {
@@ -1093,6 +1106,8 @@ export class DockEngine {
 
     this.energyRead = new Float32Array(MAX_POSES * 4);
     this.activeEnergies = new Float32Array(MAX_POSES);
+    this.prevEnergies = new Float32Array(MAX_POSES).fill(NaN);
+    this.velRead = new Float32Array(MAX_POSES * 4);
     this.posRead = new Float32Array(MAX_POSES * 4);
     this.quatRead = new Float32Array(MAX_POSES * 4);
     this.angRead = new Float32Array(MAX_POSES * 4);
@@ -1203,7 +1218,7 @@ export class DockEngine {
 
     // Double-buffered PBOs for non-blocking asynchronous readback
     this.pbo = [gl.createBuffer(), gl.createBuffer()];
-    const pboBytes = MAX_POSES * 4 * 4 * 6; // 6 float attachments
+    const pboBytes = MAX_POSES * 4 * 4 * 7; // 7 float attachments
     for (let b = 0; b < 2; b++) {
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo[b]);
       gl.bufferData(gl.PIXEL_PACK_BUFFER, pboBytes, gl.STREAM_READ);
@@ -1535,7 +1550,12 @@ export class DockEngine {
     this.best = null;
     this.history.length = 0;
     this.activeCount = 0;
+    this.movingCount = 0;
     this.meanEnergy = 0;
+    this.energyDelta = null;
+    this.converged = false;
+    this.stableSince = 0;
+    this.prevEnergies.fill(NaN);
     this.eMin = -20;
     this.eMax = 20;
     this.pboReady = false;
@@ -1547,6 +1567,10 @@ export class DockEngine {
   setOptions(partial) {
     const before = this.poseCount;
     Object.assign(this.opts, partial);
+    if (partial.temperature !== undefined || partial.sleep !== undefined) {
+      this.converged = false;
+      this.stableSince = 0;
+    }
     if (partial.renderScale !== undefined) this.renderScale = partial.renderScale;
     if (partial.poseCount !== undefined) {
       const n = clamp(Math.round(partial.poseCount), 64, MAX_POSES);
@@ -1824,10 +1848,10 @@ export class DockEngine {
     gl.uniform1f(p.u.uNoiseVel, 0.00055);
     gl.uniform1f(p.u.uNoiseAng, 0.00032);
     gl.uniform1f(p.u.uSleepFrames, 80.0);
-    gl.uniform1f(p.u.uSleepVel2, 0.00025);
+    gl.uniform1f(p.u.uSleepVel2, SLEEP_VEL2);
     gl.uniform1f(p.u.uSleepSpin2, 0.00006);
     gl.uniform1f(p.u.uSleepEps, 0.08);
-    gl.uniform1f(p.u.uWakeProb, o.sleep ? 0.00055 : 0.0);
+    gl.uniform1f(p.u.uWakeProb, o.sleep ? 0.00055 * Math.min(1, Math.max(0, o.temperature) / 300) : 0.0);
     gl.uniform1f(p.u.uUseSleep, o.sleep ? 1.0 : 0.0);
     gl.uniform1f(p.u.uReheat, this.reheatFrames > 0 ? 1.0 : 0.0);
     gl.uniform1f(p.u.uFrame, this.frame);
@@ -1870,6 +1894,7 @@ export class DockEngine {
       gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, sliceBytes * 3, this.angRead, 0, n * 4);
       gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, sliceBytes * 4, this.torsARead, 0, n * 4);
       gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, sliceBytes * 5, this.torsBRead, 0, n * 4);
+      gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, sliceBytes * 6, this.velRead, 0, n * 4);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       this._processStats(n);
     } else {
@@ -1884,6 +1909,8 @@ export class DockEngine {
       gl.readPixels(0, 0, n, 1, gl.RGBA, gl.FLOAT, this.posRead);
       gl.readBuffer(gl.COLOR_ATTACHMENT1);
       gl.readPixels(0, 0, n, 1, gl.RGBA, gl.FLOAT, this.quatRead);
+      gl.readBuffer(gl.COLOR_ATTACHMENT2);
+      gl.readPixels(0, 0, n, 1, gl.RGBA, gl.FLOAT, this.velRead);
       gl.readBuffer(gl.COLOR_ATTACHMENT3);
       gl.readPixels(0, 0, n, 1, gl.RGBA, gl.FLOAT, this.angRead);
       gl.readBuffer(gl.COLOR_ATTACHMENT4);
@@ -1912,6 +1939,8 @@ export class DockEngine {
     gl.readPixels(0, 0, n, 1, gl.RGBA, gl.FLOAT, sliceBytes * 4);
     gl.readBuffer(gl.COLOR_ATTACHMENT5);
     gl.readPixels(0, 0, n, 1, gl.RGBA, gl.FLOAT, sliceBytes * 5);
+    gl.readBuffer(gl.COLOR_ATTACHMENT2);
+    gl.readPixels(0, 0, n, 1, gl.RGBA, gl.FLOAT, sliceBytes * 6);
 
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1922,12 +1951,28 @@ export class DockEngine {
 
   _processStats(n) {
     let bestE = Infinity, bestI = -1;
-    let active = 0, activeE = 0;
+    let active = 0, activeE = 0, moving = 0;
+    let deltaSum = 0, deltaCount = 0;
+    const prevE = this.prevEnergies;
+
     for (let i = 0; i < n; i++) {
       const e = this.energyRead[i * 4 + 3];
       if (Number.isFinite(e)) {
         if (e < bestE) { bestE = e; bestI = i; }
+        if (Number.isFinite(prevE[i])) {
+          deltaSum += Math.abs(e - prevE[i]);
+          deltaCount++;
+        }
+        prevE[i] = e;
+      } else {
+        prevE[i] = NaN;
       }
+
+      const vx = this.velRead[i * 4];
+      const vy = this.velRead[i * 4 + 1];
+      const vz = this.velRead[i * 4 + 2];
+      if (vx * vx + vy * vy + vz * vz > SLEEP_VEL2) moving++;
+
       if (this.angRead[i * 4 + 3] > 0.5) {
         active++;
         if (Number.isFinite(e) && e < 500) this.activeEnergies[activeE++] = e;
@@ -1935,12 +1980,29 @@ export class DockEngine {
     }
 
     this.activeCount = active;
+    this.movingCount = moving;
+    this.energyDelta = deltaCount ? deltaSum / deltaCount : null;
     if (activeE) {
       const arr = this.activeEnergies.subarray(0, activeE);
       arr.sort();
       this.meanEnergy = arr[activeE >> 1];
     } else {
-      this.meanEnergy = 0;
+      this.meanEnergy = null;
+    }
+
+    // A quench is converged when the swarm is fully asleep, or when both the
+    // mean |ΔE| and the number of moving poses have been flat for 2 seconds.
+    const nowMs = performance.now();
+    const quiet = Number.isFinite(this.energyDelta) && this.energyDelta < 0.05 && moving === 0;
+    if (active === 0 && bestI >= 0) {
+      this.converged = true;
+      this.stableSince = nowMs;
+    } else if (quiet) {
+      if (!this.stableSince) this.stableSince = nowMs;
+      if (nowMs - this.stableSince >= 2000) this.converged = true;
+    } else {
+      this.stableSince = 0;
+      this.converged = false;
     }
     if (bestI >= 0) {
       const pos = [
@@ -1978,6 +2040,10 @@ export class DockEngine {
         poses: n,
         atoms: (this.recCount || 0) + n * (this.ligCount || 0),
         active,
+        awake: active,
+        moving,
+        energyDelta: this.energyDelta,
+        converged: this.converged,
         best: Number.isFinite(bestE) ? bestE : null,
         mean: this.meanEnergy,
         rmsd: this.best ? this.best.rmsd : null,

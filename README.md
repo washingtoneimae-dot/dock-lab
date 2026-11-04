@@ -109,7 +109,9 @@ docklab splits the problem into a **static field** and a **dynamic swarm**:
 5. **Integration pass** (`FS_INTEGRATE`) — semi-implicit Euler + quaternion update, speed
    and spin clamps, torsional integration with its own inertia/damping, Langevin noise,
    and sleep/wake logic. Poses that stay slow and low-energy for 80 frames go to sleep and
-   are skipped by the force pass.
+   are skipped by the force pass. Wake probability scales with temperature, and the
+   best-pose migration is disabled at ≤ 1 K, so 0 K is a real quench rather than a swarm
+   that keeps waking itself.
 6. **Render** — instanced point sprites: receptor atoms, the pose swarm (additively
    blended, energy-coloured), the best pose with inferred bonds, and an optional crystal
    ghost. Atom positions and bonds are transformed by the same torsion chain in the vertex
@@ -165,6 +167,12 @@ anneals back down. A spherical restraint keeps poses inside the search volume, w
 defaults to 0.85× the ligand-derived radius — a normal redocking search box, and enough to
 remove edge-of-box false positives.
 
+**Quench** drops the swarm to 0 K, which also switches off thermal wake and the
+best-pose migration, so poses settle into their nearest local minima instead of being
+recycled. While a quench is running the status badge shows `quench`; it flips to
+`converged` once every pose is asleep, or once the mean per-pose |ΔE| stays below
+0.05 kcal/mol with no moving poses for 2 seconds.
+
 ## Controls
 
 | input | action |
@@ -181,6 +189,14 @@ remove edge-of-box false positives.
 Panel: pose count, temperature, substeps, Lennard-Jones / Coulomb / solvent / pocket-contact
 scales, search volume, **flexible ligand** switch, view toggles, energy trace, and a PDB
 loader (drop in any PDB with a non-water HETATM ligand; the most populated one is used).
+**Reset** re-seeds the swarm, **Reheat** jumps to 620 K and anneals, and **Quench** drops to
+0 K and reports convergence.
+
+The HUD separates two pose counts that used to be conflated: **awake** is the number of
+poses whose sleep flag is set (they are integrated and rendered bright), while **moving**
+counts only poses whose centre-of-mass speed is above the sleep threshold. A quenched
+swarm can still be awake for a few passes after it has stopped moving; watch **moving** and
+the energy trace for the real convergence signal.
 
 Auto-quality lowers substeps and render resolution if FPS drops below 42, and restores
 them when there is headroom. Atom count is never reduced.

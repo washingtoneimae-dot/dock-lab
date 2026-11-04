@@ -10,12 +10,24 @@ function, and sleeping poses.
 
 ![docklab running at ~52 FPS on an Intel UHD 620](docs/screenshot.png)
 
+## Quick start
+
+Requires **Node 18+** and nothing else — there is no build step and no dependencies.
+
+```bash
+cd dock-lab
+npm start
 ```
+
+Then open <http://127.0.0.1:5173/>. `npm start` serves the folder and opens the browser
+for you. To start without opening a browser, use `npm run serve`. The underlying command
+is:
+
+```bash
 node server.mjs --port 5173 --open
 ```
 
-Then open <http://127.0.0.1:5173/>. Node 18+ is the only requirement; the page itself
-needs WebGL2 with float render targets (`EXT_color_buffer_float`).
+The page itself needs WebGL2 with float render targets (`EXT_color_buffer_float`).
 
 ---
 

@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>docklab — real-time GPU molecular docking</title>
+<meta name="description" content="A local-first WebGL2 docking engine: 60,000 atoms, flexible-ligand torsion trees, a precomputed interaction field, Lennard-Jones + screened Coulomb physics, implicit solvent, and sleeping poses." />
+<meta name="theme-color" content="#05070d" />
+<link rel="stylesheet" href="./styles.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23070a10'/%3E%3Ccircle cx='16' cy='16' r='3.2' fill='%23c6ff5e'/%3E%3Ccircle cx='7.5' cy='10' r='2' fill='%235ee7ff'/%3E%3Ccircle cx='24.5' cy='9.5' r='2.4' fill='%23ff4d8d'/%3E%3Ccircle cx='24' cy='23' r='1.7' fill='%23c6ff5e'/%3E%3Cpath d='M9 11l4 3M21 10.5l-3 3M22 22l-4-3' stroke='%235ee7ff' stroke-width='1.2'/%3E%3C/svg%3E" />
+</head>
+<body>
+<div class="app" id="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <i></i><i></i><i></i><i></i><i></i>
+      </span>
+      <span class="name">dock<em>lab</em></span>
+      <span class="tag">webgl2</span>
+    </div>
+
+    <div class="topstats" id="topstats">
+      <span class="stat"><i>fps</i><b id="s-fps">–</b></span>
+      <span class="stat"><i>atoms</i><b id="s-atoms">–</b></span>
+      <span class="stat"><i>poses</i><b id="s-poses">–</b></span>
+      <span class="stat"><i>active</i><b id="s-active">–</b></span>
+      <span class="stat best"><i>best</i><b id="s-best">–</b></span>
+      <span class="stat state"><i>state</i><b id="s-state">boot</b></span>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <section class="stage" id="stage">
+      <canvas id="canvas"></canvas>
+
+      <div class="stage-glow" aria-hidden="true"></div>
+
+      <div class="stage-hud">
+        <div class="hud-card">
+          <span class="hud-kicker">target</span>
+          <strong id="hud-target">EGFR kinase</strong>
+          <span id="hud-pdb">1M17 · erlotinib</span>
+        </div>
+        <div class="hud-card right">
+          <span class="hud-kicker">gpu</span>
+          <strong id="hud-gpu">detecting…</strong>
+          <span id="hud-quality">60k atom field</span>
+        </div>
+      </div>
+
+      <div class="metric-strip">
+        <div class="metric">
+          <span>best interaction energy</span>
+          <strong id="m-energy">–</strong>
+          <small>kcal/mol</small>
+        </div>
+        <div class="metric">
+          <span>rmsd to crystal pose</span>
+          <strong id="m-rmsd">–</strong>
+          <small>Å</small>
+        </div>
+        <div class="metric">
+          <span>median pose energy</span>
+          <strong id="m-mean">–</strong>
+          <small>kcal/mol</small>
+        </div>
+      </div>
+
+      <div class="hint" id="hint">
+        <kbd>drag</kbd> orbit <span>·</span> <kbd>scroll</kbd> zoom <span>·</span>
+        <kbd>space</kbd> pause <span>·</span> <kbd>R</kbd> reset <span>·</span> <kbd>F</kbd> focus best
+      </div>
+
+      <div class="loading" id="loading">
+        <div class="loader" aria-hidden="true">
+          <span></span><span></span><span></span>
+          <i></i><i></i><i></i>
+        </div>
+        <strong>Packing the receptor</strong>
+        <p id="loading-text">Parsing 1M17 · building 3D voxel hash</p>
+      </div>
+
+      <div class="error-card" id="error" hidden>
+        <span class="error-dot" aria-hidden="true"></span>
+        <h2>GPU physics unavailable</h2>
+        <p id="error-text">This demo needs WebGL2 with float render targets.</p>
+        <small>Try a recent Chrome, Edge, or Firefox with hardware acceleration enabled.</small>
+      </div>
+
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+      <div class="quality-badge" id="quality-badge" hidden>auto quality</div>
+    </section>
+
+    <aside class="panel" id="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Docking console</h2>
+          <p>Rigid receptor · flexible ligand swarm</p>
+        </div>
+        <button class="icon" id="collapse" type="button" aria-label="Toggle panel" aria-expanded="true">−</button>
+      </div>
+
+      <div class="panel-body">
+
+        <section class="group run-group">
+          <div class="run-row">
+            <button class="btn primary run" id="run" type="button">
+              <span class="play-icon" aria-hidden="true"></span>
+              <span id="run-label">Pause</span>
+            </button>
+            <button class="btn ghost" id="reset" type="button">Reset</button>
+            <button class="btn ghost" id="reheat" type="button">Reheat</button>
+          </div>
+          <div class="micro-row">
+            <span><b id="s-substeps">2</b> substeps</span>
+            <span><b id="s-temp">330</b> K</span>
+            <span><b id="s-cutoff">8.0</b> Å cutoff</span>
+          </div>
+        </section>
+
+        <section class="group target-group">
+          <div class="group-head">
+            <h3>Target</h3>
+            <button class="link" id="load-pdb" type="button">Load PDB</button>
+          </div>
+          <div class="target-card">
+            <div class="target-icon" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+            <div class="target-meta">
+              <strong id="t-name">EGFR kinase</strong>
+              <span id="t-sub">1M17 · erlotinib (AQ4)</span>
+              <small id="t-counts">2,511 receptor atoms · 29 ligand atoms</small>
+            </div>
+          </div>
+          <div class="target-actions">
+            <button class="btn tiny" id="focus-best" type="button">Focus best</button>
+            <button class="btn tiny" id="reset-cam" type="button">Reset camera</button>
+          </div>
+        </section>
+
+        <section class="group">
+          <h3>Search</h3>
+
+          <div class="ctrl" data-opt="poses">
+            <div class="ctrl-head"><label for="poses">Ligand poses</label><output id="o-poses">2,000</output></div>
+            <input id="poses" type="range" min="200" max="3000" step="100" value="2000" />
+            <small>Each pose is 29 atoms. 2,000 poses ≈ 60k atoms on screen.</small>
+          </div>
+
+          <div class="ctrl" data-opt="temperature">
+            <div class="ctrl-head"><label for="temperature">Temperature</label><output id="o-temp">330 K</output></div>
+            <input id="temperature" type="range" min="0" max="650" step="10" value="330" />
+            <small>Langevin kicks. High explores; low settles into minima.</small>
+          </div>
+
+          <div class="ctrl" data-opt="substeps">
+            <div class="ctrl-head"><label for="substeps">Physics substeps</label><output id="o-substeps">2</output></div>
+            <input id="substeps" type="range" min="1" max="4" step="1" value="2" />
+            <small>Decoupled from render rate. More substeps = faster search.</small>
+          </div>
+        </section>
+
+        <section class="group">
+          <h3>Force field</h3>
+
+          <div class="ctrl" data-opt="lj">
+            <div class="ctrl-head"><label for="lj">Lennard-Jones</label><output id="o-lj">1.00×</output></div>
+            <input id="lj" type="range" min="0" max="1.8" step="0.05" value="1" />
+          </div>
+
+          <div class="ctrl" data-opt="es">
+            <div class="ctrl-head"><label for="es">Coulomb</label><output id="o-es">1.00×</output></div>
+            <input id="es" type="range" min="0" max="1.8" step="0.05" value="1" />
+            <small>Distance-dependent dielectric (ε 1→4) plus Debye screening.</small>
+          </div>
+
+          <div class="ctrl" data-opt="solvent">
+            <div class="ctrl-head"><label for="solvent">Solvent</label><output id="o-solvent">1.00×</output></div>
+            <input id="solvent" type="range" min="0" max="2" step="0.05" value="1" />
+            <small>Polar desolvation penalty. Hydrophobic burial stays favourable.</small>
+          </div>
+
+          <div class="ctrl" data-opt="burial">
+            <div class="ctrl-head"><label for="burial">Pocket contact</label><output id="o-burial">1.00×</output></div>
+            <input id="burial" type="range" min="0" max="2" step="0.05" value="1" />
+            <small>A broad buried-contact reward. Higher values favour pockets over flat surfaces.</small>
+          </div>
+
+          <div class="ctrl" data-opt="search">
+            <div class="ctrl-head"><label for="search">Search volume</label><output id="o-search">0.85×</output></div>
+            <input id="search" type="range" min="0.7" max="1.45" step="0.05" value="0.85" />
+          </div>
+        </section>
+
+        <section class="group">
+          <div class="group-head">
+            <h3>View</h3>
+            <span class="group-note">local only</span>
+          </div>
+          <div class="switch-grid">
+            <button class="switch on" id="show-receptor" type="button" aria-pressed="true"><i></i>Receptor</button>
+            <button class="switch on" id="show-swarm" type="button" aria-pressed="true"><i></i>Pose swarm</button>
+            <button class="switch on" id="show-best" type="button" aria-pressed="true"><i></i>Best pose</button>
+            <button class="switch on" id="flex" type="button" aria-pressed="true"><i></i>Flexible ligand</button>
+            <button class="switch" id="show-crystal" type="button" aria-pressed="false"><i></i>Crystal ghost</button>
+            <button class="switch on" id="auto-rotate" type="button" aria-pressed="true"><i></i>Auto-orbit</button>
+            <button class="switch on" id="sleep" type="button" aria-pressed="true"><i></i>Sleep atoms</button>
+          </div>
+        </section>
+
+        <section class="group chart-group">
+          <div class="group-head">
+            <h3>Energy trace</h3>
+            <span class="group-note" id="chart-note">live</span>
+          </div>
+          <canvas id="chart" height="132"></canvas>
+          <div class="chart-legend">
+            <span><i class="dot lime"></i>best</span>
+            <span><i class="dot pink"></i>median</span>
+          </div>
+        </section>
+
+        <section class="group legend-group">
+          <h3>Legend</h3>
+          <div class="legend-grid">
+            <span><i class="atom c"></i>carbon</span>
+            <span><i class="atom n"></i>nitrogen</span>
+            <span><i class="atom o"></i>oxygen</span>
+            <span><i class="atom s"></i>sulfur</span>
+          </div>
+          <p class="caveat">
+            Flexible-ligand redocking with a rooted torsion tree (up to 8 rotors),
+            12-6 Lennard-Jones, distance-dependent dielectric Coulomb with Debye
+            screening, and AutoDock-style pairwise desolvation. An implicit-solvent
+            real-time search — not GB/SA, and not a replacement for AutoDock Vina.
+          </p>
+        </section>
+
+      </div>
+    </aside>
+  </main>
+
+  <input type="file" id="file" accept=".pdb,.ent,chemical/x-pdb" hidden />
+</div>
+
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>

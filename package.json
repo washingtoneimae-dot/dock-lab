@@ -1,0 +1,22 @@
+{
+  "name": "docklab",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Real-time WebGL2 molecular docking: 60k atoms, precomputed voxel interaction fields, flexible-ligand torsion trees, implicit solvent, and sleeping poses.",
+  "scripts": {
+    "start": "node server.mjs --port 5173 --open",
+    "serve": "node server.mjs --port 5173"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "webgl2",
+    "gpu",
+    "molecular-docking",
+    "lennard-jones",
+    "scientific-visualization"
+  ],
+  "license": "MIT"
+}

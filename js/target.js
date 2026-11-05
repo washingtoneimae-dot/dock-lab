@@ -43,6 +43,25 @@ export function elementInfo(sym) {
   return ELEMENT[String(sym || '').toUpperCase()] || ELEMENT.DEFAULT;
 }
 
+/* Cordero et al. (2008) single-bond covalent radii, in angstroms. These are used
+ * for element-aware bond inference when a PDB has no usable CONECT records. */
+export const COVALENT_RADIUS = {
+  H: 0.31, C: 0.76, N: 0.71, O: 0.66, S: 1.05, P: 1.07,
+  F: 0.57, CL: 1.02, BR: 1.20, I: 1.39,
+  ZN: 1.22, MG: 1.41, CA: 1.76, MN: 1.39, FE: 1.32, CU: 1.32,
+  NA: 1.66, K: 2.03, DEFAULT: 0.76
+};
+
+/* A pragmatic heavy-atom valence ceiling used to prune over-connected atoms.
+ * This is a connectivity sanity bound, not a full chemical valence model;
+ * sulfur and phosphorus are permitted at the higher degree used by sulfones,
+ * thiophosphates, and similar functional groups. */
+export const MAX_VALENCE = {
+  H: 1, C: 4, N: 4, O: 2, S: 6, P: 5,
+  F: 1, CL: 1, BR: 1, I: 1,
+  ZN: 0, MG: 0, CA: 0, MN: 0, FE: 0, CU: 0, NA: 0, K: 0, DEFAULT: 4
+};
+
 // ------------------------------------------------------------------ PDB ----
 
 function field(line, a, b) { return line.slice(a, b).trim(); }
@@ -72,14 +91,31 @@ const METAL_RES = new Set(['ZN', 'MG', 'CA', 'MN', 'FE', 'CU', 'NA', 'K', 'NI', 
  * Parse a PDB. Receptor = ATOM records + retained cofactors/metals.
  * Ligand = chosen single drug candidate molecule instance.
  */
+function parseSerial(value) {
+  const serial = parseInt(String(value || '').trim(), 10);
+  return Number.isFinite(serial) ? serial : null;
+}
+
 export function parsePDB(text, opts = {}) {
   const lines = String(text).split(/\r?\n/);
   const records = [];
+  const conectRecords = [];
   const instances = new Map(); // key -> { resName, chain, resSeq, records: [] }
 
   for (const line of lines) {
     if (line.length < 54) continue;
     const rec = line.slice(0, 6).trim();
+    if (rec === 'CONECT') {
+      const source = parseSerial(field(line, 6, 11));
+      if (source == null) continue;
+      const targets = [];
+      for (let start = 11; start + 5 <= 86; start += 5) {
+        const target = parseSerial(field(line, start, start + 5));
+        if (target != null) targets.push(target);
+      }
+      if (targets.length) conectRecords.push({ source, targets });
+      continue;
+    }
     if (rec !== 'ATOM' && rec !== 'HETATM') continue;
     const alt = line[16] || ' ';
     if (alt !== ' ' && alt !== 'A') continue;
@@ -94,7 +130,8 @@ export function parsePDB(text, opts = {}) {
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
     const element = parseElement(line, atomName);
     const isHet = rec === 'HETATM';
-    const atomObj = { isHet, resName, atomName, chain, resSeq, x, y, z, element };
+    const serial = parseSerial(field(line, 6, 11));
+    const atomObj = { serial, isHet, resName, atomName, chain, resSeq, x, y, z, element };
     records.push(atomObj);
 
     if (isHet && !WATER_RES.has(resName)) {
@@ -228,7 +265,8 @@ export function parsePDB(text, opts = {}) {
   const siteCenter = [lx - cx, ly - cy, lz - cz];
   const searchRadius = siteRadius + 9.0;
 
-  const bonds = inferBonds(ligOffset, nLig);
+  const conectBonds = conectBondsForLigand(ligand, conectRecords);
+  const bonds = inferBonds(ligOffset, nLig, ligand, conectBonds);
   const torsions = buildTorsions(ligOffset, bonds, nLig, ligParam);
 
   // CA trace, split at chain breaks
@@ -327,17 +365,100 @@ function ligandInertia(offset, param, n) {
   return Math.max(I, 1);
 }
 
-export function inferBonds(offset, n) {
-  const bonds = [];
-  const cut2 = 1.9 * 1.9;
-  for (let i = 0; i < n; i++) {
-    const ax = offset[i * 3], ay = offset[i * 3 + 1], az = offset[i * 3 + 2];
-    for (let j = i + 1; j < n; j++) {
-      const bx = offset[j * 3], by = offset[j * 3 + 1], bz = offset[j * 3 + 2];
-      const dx = ax - bx, dy = ay - by, dz = az - bz;
-      const d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 > 0.16 && d2 < cut2) bonds.push(i, j);
+function conectBondsForLigand(ligand, conectRecords) {
+  if (!conectRecords || !conectRecords.length) return null;
+  const bySerial = new Map();
+  for (let i = 0; i < ligand.length; i++) {
+    const serial = ligand[i].serial;
+    if (serial != null && !bySerial.has(serial)) bySerial.set(serial, i);
+  }
+  const bonds = new Set();
+  let found = 0;
+  for (const { source, targets } of conectRecords) {
+    const a = bySerial.get(source);
+    if (a === undefined) continue;
+    for (const target of targets) {
+      const b = bySerial.get(target);
+      if (b === undefined || a === b) continue;
+      found++;
+      bonds.add(a < b ? a * 65536 + b : b * 65536 + a);
     }
+  }
+  if (!found) return null;
+  return Array.from(bonds, (key) => [Math.floor(key / 65536), key % 65536])
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+}
+
+function covalentRadius(element) {
+  return COVALENT_RADIUS[String(element || '').toUpperCase()] ||
+    COVALENT_RADIUS.DEFAULT;
+}
+
+function valenceLimit(element) {
+  const key = String(element || '').toUpperCase();
+  return MAX_VALENCE[key] != null ? MAX_VALENCE[key] : MAX_VALENCE.DEFAULT;
+}
+
+function bondDistance(offset, i, j) {
+  const dx = offset[i * 3] - offset[j * 3];
+  const dy = offset[i * 3 + 1] - offset[j * 3 + 1];
+  const dz = offset[i * 3 + 2] - offset[j * 3 + 2];
+  return Math.hypot(dx, dy, dz);
+}
+
+/**
+ * Infer ligand connectivity without relying on a blanket distance threshold.
+ *
+ * CONECT records are authoritative and are used first. If they are absent or
+ * incomplete, accept only an element-aware covalent-radii test:
+ *
+ *   d <= 1.3 * (r_i + r_j) + 0.3 A
+ *
+ * Finally, candidates are retained greedily by increasing distance while each
+ * atom obeys a conservative maximum heavy-atom degree:
+ * C <= 4, N <= 4, O <= 2, S <= 6, P <= 5, halogens <= 1. Metals have no covalent
+ * bonds in this ligand representation.
+ */
+export function inferBonds(offset, n, elements, conectBonds = null) {
+  const normalized = [];
+  for (let i = 0; i < n; i++) {
+    normalized.push(elements && elements[i]
+      ? String(elements[i].element || elements[i]).toUpperCase()
+      : 'C');
+  }
+
+  if (conectBonds) {
+    return conectBonds.length
+      ? conectBonds.flatMap((bond) => [bond[0], bond[1]])
+      : [];
+  }
+
+  const candidates = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (valenceLimit(normalized[i]) <= 0 || valenceLimit(normalized[j]) <= 0) continue;
+      const d = bondDistance(offset, i, j);
+      const sumRadii = covalentRadius(normalized[i]) + covalentRadius(normalized[j]);
+      let limit = 1.3 * sumRadii + 0.3;
+      if (normalized[i] === 'C' && normalized[j] === 'C') {
+        // Keep stretched but genuine C-C bonds while excluding nonbonded 1,4
+        // contacts across compact rings. An absolute cap is essential because
+        // the Cordero radii sum alone (0.76 + 0.76) permits ~2.27 A.
+        limit = Math.min(limit, 1.80);
+      }
+      if (d > 0.4 && d <= limit) candidates.push([d, i, j]);
+    }
+  }
+  candidates.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+
+  const degree = new Uint16Array(n);
+  const bonds = [];
+  for (const [, i, j] of candidates) {
+    if (degree[i] >= valenceLimit(normalized[i]) ||
+        degree[j] >= valenceLimit(normalized[j])) continue;
+    degree[i]++;
+    degree[j]++;
+    bonds.push(i, j);
   }
   return bonds;
 }

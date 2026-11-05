@@ -241,8 +241,8 @@ void main() {
         vec4 meta = fetchTex(uCellMeta, ci);
         int start = int(meta.x + 0.5);
         int count = int(meta.y + 0.5);
-        int kmax = min(count, 48);
-        for (int k = 0; k < kmax; ++k) {
+        // Visit every atom in the cell: dense protein cores can exceed 48.
+        for (int k = 0; k < count; ++k) {
           int idx = int(fetchTex(uCellAtoms, start + k).r + 0.5);
           vec4 rp = fetchTex(uRecPos, idx);
           vec4 rpar = fetchTex(uRecParam, idx);
@@ -1315,22 +1315,31 @@ export class DockEngine {
     const ligOffData = new Float32Array(LIG_TEX_W * 4);
     const ligParData = new Float32Array(LIG_TEX_W * 4);
 
-    // One precomputed field layer triple per distinct ligand element type.
-    const layerOf = new Int32Array(11).fill(-1);
+    // One precomputed field layer set per distinct ligand atom class:
+    // element plus charge and polarity. A charged oxygen must not inherit a
+    // neutral oxygen's electrostatic probe, or vice versa.
+    const layerOf = new Map();
     const probes = [];
+    const atomLayer = new Int32Array(ligN);
     for (let i = 0; i < ligN; i++) {
       const el = target.ligand.element[i];
-      if (layerOf[el] < 0) {
-        layerOf[el] = probes.length;
+      const q = target.ligand.param[i * 4 + 2];
+      const polar = (el === 2 || el === 3) ? 1 : 0;
+      const chargeBin = Math.abs(q) < 0.05 ? 0 : q > 0 ? 1 : -1;
+      const key = `${el}:${chargeBin}:${polar}`;
+      let layer = layerOf.get(key);
+      if (layer === undefined) {
+        layer = probes.length;
+        layerOf.set(key, layer);
         probes.push({
           sigma: target.ligand.param[i * 4],
           eps: target.ligand.param[i * 4 + 1],
-          q: target.ligand.param[i * 4 + 2],
-          polar: (el === 2 || el === 3) ? 1 : 0
+          q
         });
       }
+      atomLayer[i] = layer;
     }
-    this.fieldLayerOf = layerOf;
+    this.fieldLayerOf = atomLayer;
     this.fieldProbes = probes;
     this.fieldLayerCount = probes.length;
 
@@ -1338,7 +1347,7 @@ export class DockEngine {
       ligOffData[i * 4] = target.ligand.offset[i * 3];
       ligOffData[i * 4 + 1] = target.ligand.offset[i * 3 + 1];
       ligOffData[i * 4 + 2] = target.ligand.offset[i * 3 + 2];
-      ligOffData[i * 4 + 3] = layerOf[target.ligand.element[i]];
+      ligOffData[i * 4 + 3] = atomLayer[i];
       ligParData[i * 4] = target.ligand.param[i * 4 + 1];
       ligParData[i * 4 + 1] = target.ligand.param[i * 4 + 2];
       ligParData[i * 4 + 2] = target.ligand.radius[i];
@@ -1730,7 +1739,9 @@ export class DockEngine {
       gl.uniform1f(p.u.uProbeSigma, probe.sigma);
       gl.uniform1f(p.u.uProbeEps, probe.eps);
       gl.uniform1f(p.u.uProbeQ, probe.q);
-      gl.uniform1f(p.u.uProbePolar, probe.polar);
+      // The probe's own charge/polarity follow its atom class, so the field
+      // layer is built with uProbePolar consistent with that probe's charge.
+      gl.uniform1f(p.u.uProbePolar, Math.abs(probe.q) >= 0.05 ? 1.0 : 0.0);
       gl.bindVertexArray(this.quadVAO);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       gl.bindVertexArray(null);

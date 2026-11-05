@@ -174,6 +174,22 @@ poses settle into their nearest local minima instead of being recycled. While a 
 running the status badge shows `quench`; it flips to `converged` once every pose is asleep,
 or once the mean per-pose |ΔE| stays below 0.05 kcal/mol with no moving poses for 2 seconds.
 
+### Starting defaults
+
+| parameter | default | note |
+|---|---:|---|
+| ligand poses | 2000 | enough coverage for a typical active site |
+| physics substeps | 2 | search-phase default; raise to 3–4 for a quench if needed |
+| temperature | 330 K | stochastic search phase |
+| Lennard-Jones | 1.00× | full steric penalty, no atom phasing |
+| Coulomb | 1.00× | neutral electrostatics baseline |
+| pocket contact (burial) | 1.00× | balanced against the steric term |
+| solvent (polar desolvation) | 1.00× | penalises unmatched buried polar atoms |
+| search volume | 0.85× | focused redocking box |
+
+These are the values the panel starts with; every one can be changed live. Auto-quality may
+lower substeps later if the GPU cannot hold 42 FPS.
+
 ## Controls
 
 | input | action |

@@ -35,12 +35,14 @@ const els = {
 };
 
 const coarse = matchMedia('(pointer: coarse)').matches;
-const small = innerWidth < 760;
 const params = new URLSearchParams(location.search);
 const paramPoses = Number(params.get('poses'));
+// Fixed starting configuration: 2,000 poses and 2 substeps, matching the
+// documented docking defaults. Users can still change either from the panel,
+// and auto-quality may lower substeps later if the GPU cannot keep up.
 const defaultPoses = Number.isFinite(paramPoses) && paramPoses >= 64
   ? Math.min(3000, Math.round(paramPoses))
-  : (coarse || small ? 900 : 2000);
+  : 2000;
 const dprCap = coarse ? 1.25 : 1.5;
 
 const state = {
@@ -84,7 +86,7 @@ async function boot() {
     loadingText.textContent = 'Building 3D voxel hash + GPU pose textures';
     engine = new DockEngine(canvas, {
       poseCount: defaultPoses,
-      substeps: coarse ? 1 : 2,
+      substeps: 2,
       temperature: 330,
       ljScale: 1.0,
       esScale: 1.0,

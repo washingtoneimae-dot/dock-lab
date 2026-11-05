@@ -218,6 +218,11 @@ the energy trace for the real convergence signal.
 Auto-quality lowers substeps and render resolution if FPS drops below 42, and restores
 them when there is headroom. Atom count is never reduced.
 
+Turning **Sleep atoms** off wakes any pose that was already asleep. If sleep is
+re-enabled, slow low-energy poses can go to sleep again after the usual 80-frame quiet
+period. With sleep off, **awake** remains at the full pose count and poses do not use the
+sleep optimisation.
+
 ## Files
 
 ```
